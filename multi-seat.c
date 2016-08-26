@@ -13,7 +13,7 @@
 #include <poll.h>
 #include <wayland-client.h>
 
-#define SEAT_INTERFACE_VERSION (2)
+#define SEAT_INTERFACE_VERSION (4)
 #define COMPOSITOR_INTERFACE_VERSION (1)
 #define SHELL_INTERFACE_VERSION (1)
 #define SHM_INTERFACE_VERSION (1)
@@ -218,35 +218,25 @@ _print_seat_cap(struct SeatItem *item, bool changed)
         return;
      }
 
-   if (item->cap & WL_SEAT_CAPABILITY_POINTER) {
+   if ((item->cap & WL_SEAT_CAPABILITY_POINTER) && !item->pointer) {
       printf("\t* Mouse\n");
-      if (!item->pointer)
-        {
-           item->pointer = wl_seat_get_pointer(item->seat);
-           assert(item->pointer);
-           wl_pointer_add_listener(item->pointer, &_pointer_listener, item);
-        }
-      else
-        {
-           wl_pointer_release(item->pointer);
-           item->pointer = NULL;
-        }
+      item->pointer = wl_seat_get_pointer(item->seat);
+      assert(item->pointer);
+      wl_pointer_add_listener(item->pointer, &_pointer_listener, item);
+   } else if (!(item->cap & WL_SEAT_CAPABILITY_POINTER) && item->pointer) {
+      wl_pointer_release(item->pointer);
+      item->pointer = NULL;
    }
 
-   if (item->cap & WL_SEAT_CAPABILITY_KEYBOARD) {
+   if ((item->cap & WL_SEAT_CAPABILITY_KEYBOARD) && !item->keyboard) {
       printf("\t* Keyboard\n");
-      if (!item->keyboard)
-        {
-           item->keyboard = wl_seat_get_keyboard(item->seat);
-           assert(item->keyboard);
-           wl_keyboard_add_listener(item->keyboard, &_keyboard_listener,
-                                    item);
-        }
-      else
-        {
-           wl_keyboard_release(item->keyboard);
-           item->keyboard = NULL;
-        }
+      item->keyboard = wl_seat_get_keyboard(item->seat);
+      assert(item->keyboard);
+      wl_keyboard_add_listener(item->keyboard, &_keyboard_listener,
+                               item);
+   } else if (!(item->cap & WL_SEAT_CAPABILITY_KEYBOARD) && item->keyboard) {
+      wl_keyboard_release(item->keyboard);
+      item->keyboard = NULL;
    }
 }
 
