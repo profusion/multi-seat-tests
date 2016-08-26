@@ -448,8 +448,7 @@ main(int argc, char *argv[])
    struct wl_registry *registry;
    struct wl_shell_surface *shell_surface;
    struct wl_surface *surface;
-   struct SeatItem *item;
-   struct wl_list link;
+   struct SeatItem *item, *tmp;
    struct sigaction sa;
 
    wl_list_init(&ctx.seats);
@@ -502,7 +501,7 @@ main(int argc, char *argv[])
          wl_display_dispatch(display);
    }
 
-   wl_list_for_each(item, &ctx.seats, link) {
+   wl_list_for_each_safe(item, tmp, &ctx.seats, link) {
       if (item->pointer)
         wl_pointer_destroy(item->pointer);
       if (item->keyboard)
