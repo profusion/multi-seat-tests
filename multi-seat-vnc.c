@@ -50,23 +50,49 @@ _keyboard_event(rfbBool down, rfbKeySym keySym, rfbClientRec *client)
 {
    unsigned *s;
 
-   if (!down)
-     return;
-
    s = client->clientData;
-   printf("The client on seat '%u' pressed the key '%"PRIu32"'\n", *s, keySym);
+   if (!down)
+       printf("The client on seat '%u' pressed the key '%"PRIu32"'\n",
+              *s, keySym);
+   else
+       printf("The client on seat '%u' released the key '%"PRIu32"'\n",
+              *s, keySym);
 
    if (keySym == XK_Escape || keySym =='q' || keySym =='Q')
      rfbCloseClient(client);
 }
 
+static int
+_get_button(int buttonMask)
+{
+    int i;
+    for (i = 0; i < 32; i++)
+        if (buttonMask >> i & 1)
+            return i + 1;
+    return 0;
+}
+
 static void
-_pointer_event(int buttonMask,int x,int y,rfbClientPtr client)
+_pointer_event(int buttonMask, int x, int y, rfbClientPtr client)
 {
    unsigned *s;
+   int button, buttonChanged;
 
    s = client->clientData;
-   printf("The client on seat '%u' moved to mouse to X: %d Y: %d\n", *s, x, y);
+
+   /* Apparently lastPtrX and Y wasn't updated, so maybe we need
+      to keep positions on the program side. */
+   printf("The client's cursor on seat '%u' is at X: %d Y: %d\n",
+           *s, x, y);
+   /* Check if a mouse button was pressed or released */
+   buttonChanged = buttonMask - client->lastPtrButtons;
+   if (buttonChanged > 0) {
+       button = _get_button(buttonChanged);
+       printf("The client on seat '%u' pressed button: %d\n", *s, button);
+   } else if (buttonChanged < 0) {
+       button = _get_button(-buttonChanged);
+       printf("The client on seat '%u' released button: %d\n", *s, button);
+   }
 }
 
 static Evas *
