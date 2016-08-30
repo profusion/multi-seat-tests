@@ -502,7 +502,9 @@ main(int argc, char *argv[])
       free(item);
    }
 
-   wl_buffer_destroy(ctx.buffer);
+   /* it may be destroyed on buffer_release already */
+   if (ctx.buffer)
+       wl_buffer_destroy(ctx.buffer);
    wl_shell_destroy(ctx.shell);
    wl_shm_destroy(ctx.shm);
    wl_compositor_destroy(ctx.compositor);
