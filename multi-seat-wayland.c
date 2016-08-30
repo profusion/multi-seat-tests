@@ -345,7 +345,6 @@ _registry_global_remove(void *data,
 {
    struct Context *ctx = data;
    struct SeatItem *item;
-   struct wl_list link;
 
    wl_list_for_each(item, &ctx->seats, link) {
       if (item->id == id)
