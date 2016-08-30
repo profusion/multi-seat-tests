@@ -23,6 +23,11 @@
 #define STRIDE ((WIDTH) * (4))
 #define BUFFER_SIZE ((STRIDE) * (HEIGHT))
 
+/* It uses button numbers from linux/input.h */
+# define BTN_LEFT 0x110
+# define BTN_RIGHT 0x111
+# define BTN_MIDDLE 0x112
+
 struct SeatItem {
    struct wl_seat *seat;
    struct wl_pointer *pointer;
@@ -82,8 +87,20 @@ _pointer_button(void *data,
 {
    struct SeatItem *item = data;
 
-   printf("The pointer from seat '%s' pressed the button '%"PRIu32"'\n",
-          item->name, button);
+   /* Convert from linux to efl buttons */
+   if (button == BTN_LEFT)
+       button = 1;
+   else if (button == BTN_MIDDLE)
+       button = 2;
+   else if (button == BTN_RIGHT)
+       button = 3;
+
+   if (state)
+       printf("The pointer from seat '%s' pressed the button '%"PRIu32"'\n",
+              item->name, button);
+   else
+       printf("The pointer from seat '%s' released the button '%"PRIu32"'\n",
+              item->name, button);
 }
 
 static void
