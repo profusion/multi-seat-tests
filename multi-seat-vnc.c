@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <Evas.h>
+#include <Ecore.h>
 #include <Evas_Engine_Buffer.h>
 #include <rfb/rfb.h>
 #include <rfb/keysym.h>
@@ -10,25 +11,47 @@
 
 #define WIDTH (800)
 #define HEIGHT (600)
+#define RECT_DIMEN (100)
 
 static unsigned seat = 1;
 static rfbScreenInfoPtr server = NULL;
+static Ecore_Animator *animator = NULL;
+
+struct Client_Data {
+   unsigned seat;
+   Ecore_Fd_Handler *fd_handler;
+};
 
 static void
 _client_gone(rfbClientRec *client)
 {
-   unsigned *s;
+   struct Client_Data *cd;
 
+   cd = client->clientData;
    seat--;
-   s = client->clientData;
-   printf("Client on seat '%u' is gone\n", *s);
-   free(client->clientData);
+   printf("Client on seat '%u' is gone\n", cd->seat);
+   ecore_main_fd_handler_del(cd->fd_handler);
+   free(cd);
+}
+
+static Eina_Bool
+_client_activity(void *data, Ecore_Fd_Handler *fd_handler)
+{
+   rfbClientRec *client = data;
+
+   rfbProcessClientMessage(client);
+   if (client->sock == -1)
+     {
+        rfbClientConnectionGone(client);
+        return ECORE_CALLBACK_DONE;
+     }
+   return ECORE_CALLBACK_RENEW;
 }
 
 static enum rfbNewClientAction
 _new_client(rfbClientRec *client)
 {
-   unsigned *s;
+   struct Client_Data *cd;
 
    if (seat == UINT_MAX)
      {
@@ -37,26 +60,31 @@ _new_client(rfbClientRec *client)
      }
 
    printf("New client attached to seat '%u'\n", seat);
-   s = malloc(sizeof(unsigned));
-   assert(s);
-   client->clientData = s;
+   cd = malloc(sizeof(struct Client_Data));
+   assert(cd);
+   client->clientData = cd;
    client->clientGoneHook = _client_gone;
-   *s = seat++;
+   cd->seat = seat++;
+
+   cd->fd_handler = ecore_main_fd_handler_add(client->sock, ECORE_FD_READ,
+                                          _client_activity, client, NULL, NULL);
+   assert(cd->fd_handler);
    return RFB_CLIENT_ACCEPT;
 }
 
 static void
 _keyboard_event(rfbBool down, rfbKeySym keySym, rfbClientRec *client)
 {
-   unsigned *s;
+   struct Client_Data *cd;
 
-   s = client->clientData;
+   cd = client->clientData;
+
    if (!down)
        printf("The client on seat '%u' pressed the key '%"PRIu32"'\n",
-              *s, keySym);
+              cd->seat, keySym);
    else
        printf("The client on seat '%u' released the key '%"PRIu32"'\n",
-              *s, keySym);
+              cd->seat, keySym);
 
    if (keySym == XK_Escape || keySym =='q' || keySym =='Q')
      rfbCloseClient(client);
@@ -75,23 +103,24 @@ _get_button(int buttonMask)
 static void
 _pointer_event(int buttonMask, int x, int y, rfbClientPtr client)
 {
-   unsigned *s;
    int button, buttonChanged;
+   struct Client_Data *cd;
 
-   s = client->clientData;
+   cd = client->clientData;
 
    /* Apparently lastPtrX and Y wasn't updated, so maybe we need
       to keep positions on the program side. */
    printf("The client's cursor on seat '%u' is at X: %d Y: %d\n",
-           *s, x, y);
+           cd->seat, x, y);
    /* Check if a mouse button was pressed or released */
    buttonChanged = buttonMask - client->lastPtrButtons;
    if (buttonChanged > 0) {
        button = _get_button(buttonChanged);
-       printf("The client on seat '%u' pressed button: %d\n", *s, button);
+       printf("The client on seat '%u' pressed button: %d\n", cd->seat, button);
    } else if (buttonChanged < 0) {
        button = _get_button(-buttonChanged);
-       printf("The client on seat '%u' released button: %d\n", *s, button);
+       printf("The client on seat '%u' released button: %d\n", cd->seat,
+              button);
    }
 }
 
@@ -127,10 +156,61 @@ _create_evas_frame(void *pixels)
    return evas;
 }
 
+static Eina_Bool
+_anim(void *data)
+{
+   rfbClientIteratorPtr itr;
+   rfbClientRec *client;
+   static enum { RIGHT, LEFT } direction = LEFT;
+   static const int speed = 20;
+   int x, y;
+   Evas_Object *rect = data;
+   Eina_List *updates, *n;
+   Eina_Rectangle *update;
+
+   evas_object_geometry_get(rect, &x, &y, NULL, NULL);
+   if (direction == LEFT)
+     {
+        x -= speed;
+        if (x <= 0)
+          {
+             x = 0;
+             direction = RIGHT;
+          }
+     }
+   else
+     {
+        x += speed;
+        if (x >= WIDTH)
+          {
+             direction = LEFT;
+             x = WIDTH;
+          }
+     }
+
+   evas_object_move(rect, x, y);
+
+   updates = evas_render_updates(evas_object_evas_get(rect));
+   EINA_LIST_FOREACH(updates, n, update)
+      rfbMarkRectAsModified(server, update->x, update->y, update->w, update->h);
+   evas_render_updates_free(updates);
+
+   itr = rfbGetClientIterator(server);
+   while ((client = rfbClientIteratorNext(itr)) != NULL) {
+      rfbUpdateClient(client);
+
+      if (client->sock == -1)
+         rfbClientConnectionGone(client);
+   }
+   rfbReleaseClientIterator(itr);
+
+   return ECORE_CALLBACK_RENEW;
+}
+
 static void
 _draw_objects(Evas *evas)
 {
-   Evas_Object *bg, *txt;
+   Evas_Object *bg, *txt, *rect;
 
    bg = evas_object_rectangle_add(evas);
    assert(bg);
@@ -148,18 +228,36 @@ _draw_objects(Evas *evas)
       "Move your mouse and press your keyboard keys. Press ESC to exit. ");
    evas_object_move(txt, 0, 0);
    evas_object_show(txt);
+
+   rect = evas_object_rectangle_add(evas);
+   assert(rect);
+   evas_object_color_set(rect, 255, 0, 0, 255);
+   evas_object_resize(rect, RECT_DIMEN, RECT_DIMEN);
+   evas_object_move(rect, (WIDTH - RECT_DIMEN) /2, (HEIGHT- RECT_DIMEN)/2);
+   evas_object_show(rect);
+
+   animator = ecore_animator_add(_anim, rect);
+   assert(animator);
 }
 
 static void
 _sig_action(int signum)
 {
-   rfbShutdownServer(server, TRUE);
+   ecore_main_loop_quit();
+}
+
+static Eina_Bool
+_socket_activity(void *data, Ecore_Fd_Handler *fd_handler)
+{
+   rfbProcessNewConnection(data);
+   return ECORE_CALLBACK_RENEW;
 }
 
 int
 main(int argc, char *argv[])
 {
    Evas *evas;
+   Ecore_Fd_Handler *fd_handler, *fd_handler6;
 
    struct sigaction sa;
 
@@ -168,6 +266,7 @@ main(int argc, char *argv[])
    sa.sa_flags = SA_RESETHAND;
    sigaction(SIGINT, &sa, NULL);
 
+   assert(ecore_init());
    assert(evas_init());
 
    server = rfbGetScreen(&argc, argv, WIDTH, HEIGHT, 8, 3, 4);
@@ -187,9 +286,23 @@ main(int argc, char *argv[])
    server->alwaysShared = TRUE;
 
    rfbInitServer(server);
-   rfbRunEventLoop(server, -1, FALSE);
+   fd_handler = ecore_main_fd_handler_add(server->listenSock, ECORE_FD_READ,
+                                          _socket_activity, server, NULL, NULL);
+   assert(fd_handler);
+   fd_handler6 = ecore_main_fd_handler_add(server->listen6Sock, ECORE_FD_READ,
+                                          _socket_activity, server, NULL, NULL);
+
+   assert(fd_handler6);
+   ecore_main_loop_begin();
+
+   ecore_main_fd_handler_del(fd_handler);
+   ecore_main_fd_handler_del(fd_handler6);
+
+   ecore_animator_del(animator);
    evas_free(evas);
+
    evas_shutdown();
+   ecore_shutdown();
    free(server->frameBuffer);
    rfbScreenCleanup(server);
    return 0;
