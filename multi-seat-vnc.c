@@ -1,11 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
 #include <Evas.h>
 #include <Evas_Engine_Buffer.h>
 #include <rfb/rfb.h>
 #include <rfb/keysym.h>
 #include <limits.h>
+#include <Eina.h>
 #include <signal.h>
 
 #define WIDTH (800)
@@ -38,7 +38,7 @@ _new_client(rfbClientRec *client)
 
    printf("New client attached to seat '%u'\n", seat);
    s = malloc(sizeof(unsigned));
-   assert(s);
+   EINA_SAFETY_ON_NULL_RETURN_VAL(s, RFB_CLIENT_REFUSE);
    client->clientData = s;
    client->clientGoneHook = _client_gone;
    *s = seat++;
@@ -103,17 +103,17 @@ _create_evas_frame(void *pixels)
    int method;
 
    method = evas_render_method_lookup("buffer");
-   assert(method != 0);
+   EINA_SAFETY_ON_TRUE_RETURN_VAL(method == 0, NULL);
 
    evas = evas_new();
-   assert(evas);
+   EINA_SAFETY_ON_NULL_RETURN_VAL(evas, NULL);
 
    evas_output_method_set(evas, method);
    evas_output_size_set(evas, WIDTH, HEIGHT);
    evas_output_viewport_set(evas, 0, 0, WIDTH, HEIGHT);
 
    einfo = (Evas_Engine_Info_Buffer *)evas_engine_info_get(evas);
-   assert(einfo);
+   EINA_SAFETY_ON_NULL_GOTO(einfo, err_einfo);
 
    einfo->info.depth_type = EVAS_ENGINE_BUFFER_DEPTH_ARGB32;
    einfo->info.dest_buffer = pixels;
@@ -125,22 +125,26 @@ _create_evas_frame(void *pixels)
    evas_engine_info_set(evas, (Evas_Engine_Info *)einfo);
 
    return evas;
+
+ err_einfo:
+   evas_free(evas);
+   return NULL;
 }
 
-static void
+static int
 _draw_objects(Evas *evas)
 {
    Evas_Object *bg, *txt;
 
    bg = evas_object_rectangle_add(evas);
-   assert(bg);
+   EINA_SAFETY_ON_NULL_RETURN_VAL(bg, -1);
    evas_object_color_set(bg, 255, 255, 255, 255);
    evas_object_move(bg, 0, 0);
    evas_object_resize(bg, WIDTH, HEIGHT);
    evas_object_show(bg);
 
    txt = evas_object_text_add(evas);
-   assert(txt);
+   EINA_SAFETY_ON_NULL_RETURN_VAL(txt, -1);
    evas_object_color_set(txt, 0, 0, 0, 255);
    evas_object_text_style_set(txt, EVAS_TEXT_STYLE_PLAIN);
    evas_object_text_font_set(txt, "Sans", 15);
@@ -148,6 +152,8 @@ _draw_objects(Evas *evas)
       "Move your mouse and press your keyboard keys. Press ESC to exit. ");
    evas_object_move(txt, 0, 0);
    evas_object_show(txt);
+
+   return 0;
 }
 
 static void
@@ -160,6 +166,7 @@ int
 main(int argc, char *argv[])
 {
    Evas *evas;
+   int r = -1;
 
    struct sigaction sa;
 
@@ -168,17 +175,19 @@ main(int argc, char *argv[])
    sa.sa_flags = SA_RESETHAND;
    sigaction(SIGINT, &sa, NULL);
 
-   assert(evas_init());
+   EINA_SAFETY_ON_TRUE_RETURN_VAL(evas_init() == 0, -1);
 
    server = rfbGetScreen(&argc, argv, WIDTH, HEIGHT, 8, 3, 4);
-   assert(server);
+   EINA_SAFETY_ON_NULL_GOTO(server, err_server);
 
    server->frameBuffer = malloc(WIDTH * HEIGHT * 4);
-   assert(server->frameBuffer);
+   EINA_SAFETY_ON_NULL_GOTO(server->frameBuffer, err_buffer);
 
    evas = _create_evas_frame(server->frameBuffer);
+   EINA_SAFETY_ON_NULL_GOTO(evas, err_evas);
 
-   _draw_objects(evas);
+   r = _draw_objects(evas);
+   EINA_SAFETY_ON_TRUE_GOTO(r == -1, err_draw);
    evas_render_updates_free(evas_render_updates(evas));
 
    server->newClientHook = _new_client;
@@ -188,9 +197,14 @@ main(int argc, char *argv[])
 
    rfbInitServer(server);
    rfbRunEventLoop(server, -1, FALSE);
+   r = 0;
+ err_draw:
    evas_free(evas);
-   evas_shutdown();
+ err_evas:
    free(server->frameBuffer);
+ err_buffer:
    rfbScreenCleanup(server);
-   return 0;
+ err_server:
+   evas_shutdown();
+   return r;
 }

@@ -1,12 +1,12 @@
 #define _GNU_SOURCE
 
+#include <Eina.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <fcntl.h>
 #include <string.h>
 #include <stdlib.h>
-#include <assert.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <signal.h>
@@ -222,6 +222,20 @@ static const struct wl_keyboard_listener _keyboard_listener = {
 };
 
 static void
+_release_seat(struct SeatItem *item)
+{
+   if (item->pointer)
+     wl_pointer_destroy(item->pointer);
+   if (item->keyboard)
+     wl_keyboard_destroy(item->keyboard);
+   if (item->seat)
+     wl_seat_destroy(item->seat);
+   wl_list_remove(&item->link);
+   free(item->name);
+   free(item);
+}
+
+static void
 _print_seat_cap(struct SeatItem *item, bool changed)
 {
    if (changed)
@@ -238,7 +252,7 @@ _print_seat_cap(struct SeatItem *item, bool changed)
    if ((item->cap & WL_SEAT_CAPABILITY_POINTER) && !item->pointer) {
       printf("\t* Mouse\n");
       item->pointer = wl_seat_get_pointer(item->seat);
-      assert(item->pointer);
+      EINA_SAFETY_ON_NULL_GOTO(item->pointer, err);
       wl_pointer_add_listener(item->pointer, &_pointer_listener, item);
    } else if (!(item->cap & WL_SEAT_CAPABILITY_POINTER) && item->pointer) {
       wl_pointer_release(item->pointer);
@@ -248,13 +262,17 @@ _print_seat_cap(struct SeatItem *item, bool changed)
    if ((item->cap & WL_SEAT_CAPABILITY_KEYBOARD) && !item->keyboard) {
       printf("\t* Keyboard\n");
       item->keyboard = wl_seat_get_keyboard(item->seat);
-      assert(item->keyboard);
       wl_keyboard_add_listener(item->keyboard, &_keyboard_listener,
                                item);
+      EINA_SAFETY_ON_NULL_GOTO(item->keyboard, err);
    } else if (!(item->cap & WL_SEAT_CAPABILITY_KEYBOARD) && item->keyboard) {
       wl_keyboard_release(item->keyboard);
       item->keyboard = NULL;
    }
+
+   return;
+ err:
+   _release_seat(item);
 }
 
 static void
@@ -263,9 +281,14 @@ _seat_name(void *data, struct wl_seat *seat, const char *name)
    struct SeatItem *item = data;
 
    item->name = strdup(name);
-   assert(item->name);
+   EINA_SAFETY_ON_NULL_GOTO(item->name, err_name);
 
    _print_seat_cap(item, false);
+
+   return;
+
+ err_name:
+   _release_seat(item);
 }
 
 static void
@@ -303,15 +326,11 @@ _registry_global_add(void *data,
 
         printf("Found the seat interface with id '%"PRIu32"'\n", id);
         item = calloc(1, sizeof(struct SeatItem));
-        if (!item)
-          {
-             fprintf(stderr, "Could not alloc memory for the seat item\n");
-             return;
-          }
+        EINA_SAFETY_ON_NULL_RETURN(item);
 
         item->seat = wl_registry_bind(wl_registry, id, &wl_seat_interface,
                                       SEAT_INTERFACE_VERSION);
-        assert(item->seat);
+        EINA_SAFETY_ON_NULL_GOTO(item->seat, err_seat);
         item->id = id;
 
         wl_seat_add_listener(item->seat, &_seat_listener, item);
@@ -322,20 +341,22 @@ _registry_global_add(void *data,
         ctx->compositor = wl_registry_bind(wl_registry, id,
                                            &wl_compositor_interface,
                                            COMPOSITOR_INTERFACE_VERSION);
-        assert(ctx->compositor);
      }
    else if (!strcmp(interface, wl_shell_interface.name))
      {
         ctx->shell = wl_registry_bind(wl_registry, id, &wl_shell_interface,
                                       SHELL_INTERFACE_VERSION);
-        assert(ctx->shell);
      }
    else if (!strcmp(interface, wl_shm_interface.name))
      {
         ctx->shm = wl_registry_bind(wl_registry, id, &wl_shm_interface,
                                     SHM_INTERFACE_VERSION);
-        assert(ctx->shm);
      }
+
+   return;
+
+ err_seat:
+   free(item);
 }
 
 static void
@@ -349,10 +370,7 @@ _registry_global_remove(void *data,
    wl_list_for_each(item, &ctx->seats, link) {
       if (item->id == id)
         {
-           wl_seat_destroy(item->seat);
-           wl_list_remove(&item->link);
-           free(item->name);
-           free(item);
+           _release_seat(item);
            break;
         }
    }
@@ -404,7 +422,7 @@ static const struct wl_buffer_listener _buffer_listener = {
   .release = buffer_release
 };
 
-static void
+static int
 _setup_buffer(struct Context *ctx, struct wl_surface *surface)
 {
    int fd, r;
@@ -416,25 +434,33 @@ _setup_buffer(struct Context *ctx, struct wl_surface *surface)
 
    snprintf(final_path, sizeof(final_path), "%s", template);
    fd = mkostemp(final_path, O_CLOEXEC);
-   assert(fd != -1);
+   EINA_SAFETY_ON_TRUE_RETURN_VAL(fd == -1, -1);
    unlink(final_path);
 
    r = ftruncate(fd, BUFFER_SIZE);
-   assert(r == 0);
+   EINA_SAFETY_ON_TRUE_GOTO(r == -1, err_truncate);
 
    pool = wl_shm_create_pool(ctx->shm, fd, BUFFER_SIZE);
-   assert(pool);
+   r = -1;
+   EINA_SAFETY_ON_NULL_GOTO(pool, err_truncate);
 
    buffer = wl_shm_pool_create_buffer(pool, 0,
                                       WIDTH, HEIGHT,
                                       STRIDE,
                                       WL_SHM_FORMAT_XRGB8888);
-   assert(buffer);
+   EINA_SAFETY_ON_NULL_GOTO(buffer, err_buffer);
+
    wl_surface_attach(surface, buffer, 0, 0);
    wl_buffer_add_listener(buffer, &_buffer_listener, ctx);
    ctx->buffer = buffer;
+   r = 0;
+
+ err_buffer:
    wl_shm_pool_destroy(pool);
+ err_truncate:
    close(fd);
+
+   return r;
 }
 
 static bool stop = false;
@@ -448,7 +474,7 @@ _sig_action(int signum)
 int
 main(int argc, char *argv[])
 {
-   int r;
+   int r = -1;
    struct Context ctx;
    struct wl_display *display;
    struct wl_registry *registry;
@@ -466,13 +492,10 @@ main(int argc, char *argv[])
 
    printf("Trying to connect to Wayland\n");
    display = wl_display_connect(NULL);
-   if (!display) {
-      fprintf(stderr, "Can't connect to display!\n");
-      return -1;
-   }
+   EINA_SAFETY_ON_NULL_RETURN_VAL(display, r );
 
    registry = wl_display_get_registry(display);
-   assert(registry);
+   EINA_SAFETY_ON_NULL_GOTO(registry, err_registry);
 
    wl_registry_add_listener(registry, &_registry_listener, &ctx);
 
@@ -480,24 +503,29 @@ main(int argc, char *argv[])
    wl_display_roundtrip(display);
    wl_registry_destroy(registry);
 
+   EINA_SAFETY_ON_NULL_GOTO(ctx.compositor, err_registry);
+   EINA_SAFETY_ON_NULL_GOTO(ctx.shell, err_registry);
+   EINA_SAFETY_ON_NULL_GOTO(ctx.shm, err_registry);
+
    surface = wl_compositor_create_surface(ctx.compositor);
-   assert(surface);
+   EINA_SAFETY_ON_NULL_GOTO(surface, err_surface);
    shell_surface = wl_shell_get_shell_surface(ctx.shell, surface);
-   assert(shell_surface);
+   EINA_SAFETY_ON_NULL_GOTO(shell_surface, err_shell_surface);
 
    wl_shell_surface_add_listener(shell_surface, &_ss_listener, NULL);
    wl_shell_surface_set_toplevel(shell_surface);
    wl_surface_damage(surface, 0, 0, 800, 600);
-   _setup_buffer(&ctx, surface);
+   r = _setup_buffer(&ctx, surface);
+   EINA_SAFETY_ON_TRUE_GOTO(r == -1, err_buffer);
    wl_surface_commit(surface);
 
    while (!stop) {
       struct pollfd pfd;
 
       r = wl_display_dispatch_pending(display);
-      assert(r == 0);
+      EINA_SAFETY_ON_TRUE_GOTO(r == -1, err_loop);
       r = wl_display_flush(display);
-      assert(r >= 0);
+      EINA_SAFETY_ON_TRUE_GOTO(r == -1, err_loop);
 
       pfd.fd = wl_display_get_fd(display);
       pfd.events = POLLIN;
@@ -507,27 +535,27 @@ main(int argc, char *argv[])
          wl_display_dispatch(display);
    }
 
+   r = 0;
+
    wl_list_for_each_safe(item, tmp, &ctx.seats, link) {
-      if (item->pointer)
-        wl_pointer_destroy(item->pointer);
-      if (item->keyboard)
-        wl_keyboard_destroy(item->keyboard);
-      if (item->seat)
-        wl_seat_destroy(item->seat);
-      free(item->name);
-      free(item);
+      _release_seat(item);
    }
 
+ err_loop:
    /* it may be destroyed on buffer_release already */
    if (ctx.buffer)
        wl_buffer_destroy(ctx.buffer);
+ err_buffer:
    wl_shell_destroy(ctx.shell);
    wl_shm_destroy(ctx.shm);
    wl_compositor_destroy(ctx.compositor);
    wl_shell_surface_destroy(shell_surface);
+ err_shell_surface:
    wl_surface_destroy(surface);
+ err_surface:
+ err_registry:
    wl_display_disconnect(display);
    printf("Disconnected from display\n");
 
-   return 0;
+   return r;
 }
